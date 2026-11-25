@@ -20,11 +20,19 @@ class ReportScheduleService(BaseModuleService):
     ACTION_RULES = {"启动调度": "待启动", "暂停调度": "运行中"}
     NEGATIVE_ACTIONS = []
 
-    def generate_report(self, task_id: int) -> dict[str, Any]:
-        """生成一份模拟报告。"""
+    def generate_report(self, task_id: int, report_id: str | int | None = None) -> dict[str, Any]:
+        """生成一份报告，并附带可核对的分区来源、实际范围和发布守卫。"""
         task = store.find(self.MODULE, task_id)
         if not task:
             return {"error": f"报告任务 {task_id} 不存在"}
+        from app.services.reconciliation import reconciliation
+
+        if report_id is not None:
+            scope_report = reconciliation.get_report(report_id)
+        else:
+            reports = reconciliation.list_reports()["items"]
+            scope_report = reports[-1] if reports else reconciliation.create_report(task_id)
+
         rng = random.Random(task_id * 43)
         now = datetime.now()
         send_now = now.isoformat()
@@ -44,13 +52,59 @@ class ReportScheduleService(BaseModuleService):
                 {"name": "趋势分析", "summary": "本周整体指标平稳，搜索转化率下降2.3%，需关注推荐算法迭代效果"},
             ],
             "next_schedule": next_send,
+            "scope_report": scope_report,
+            "daily_scope_report": scope_report,
+            "report_id": scope_report.get("report_id") if scope_report else None,
+            "sources_used": [s for s in (scope_report or {}).get("sources", []) if s.get("used_in_total")],
+            "source_usage": (scope_report or {}).get("sources", []),
+            "actual_regions": (scope_report or {}).get("actual_regions", []),
+            "unconfirmed_regions": (scope_report or {}).get("unconfirmed_regions", []),
+            "confirmed_total": (scope_report or {}).get("confirmed_total"),
+            "publish_guard": "未确认地区不得计入当日总量；完整全国范围发布需所有分区读取确认",
         }
         update = store.find(self.MODULE, task_id)
         if update:
             update["上次发送"] = send_now
             update["下次发送"] = next_send
             update["status"] = "运行中"
+            update["latest_scope_report"] = {
+                "report_id": report_content["report_id"],
+                "actual_regions": report_content["actual_regions"],
+                "unconfirmed_regions": report_content["unconfirmed_regions"],
+                "confirmed_total": report_content["confirmed_total"],
+            }
         return report_content
+
+    def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
+        """让通用动作接口也能执行带范围守卫的报告发布。"""
+        from app.services.reconciliation import reconciliation
+
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return None, f"{self.ENTITY} {entry_id} 不存在"
+
+        if action in {"生成当日汇报", "申请当日汇报", "生成报告"}:
+            report = self.generate_report(entry_id)
+            entry["latest_generated_report"] = report
+            return entry, f"报告已生成：{report.get('report_id')}"
+
+        if action in {"发布已确认范围", "发布部分报告", "发布报告"}:
+            reports = reconciliation.list_reports()["items"]
+            report_id = reports[-1]["report_id"] if reports else None
+            publication = reconciliation.publish_report(report_id, {"mode": "confirmed"})
+            entry["last_publication"] = publication
+            return entry, str(publication.get("message") or publication.get("error"))
+
+        if action in {"发布全国总量", "发布完整当日总量", "发布当日总量"}:
+            reports = reconciliation.list_reports()["items"]
+            report_id = reports[-1]["report_id"] if reports else None
+            publication = reconciliation.publish_report(report_id, {"as_national": True})
+            if not publication.get("ok"):
+                return None, str(publication.get("error"))
+            entry["last_publication"] = publication
+            return entry, str(publication.get("message"))
+
+        return super().run_action(entry_id, action)
 
     def domain_enrich(self, config_id: int) -> dict:
         """对当前模块执行存储操作，联动导出和回填，产出标准化数据产物。

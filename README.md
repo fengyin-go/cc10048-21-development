@@ -69,6 +69,43 @@ npm run dev
 | 数据采样 | `data_sample` | 采样配置 | 配置标识、数据来源、采样方法 |
 | 报告调度 | `report_schedule` | 报告任务 | 任务标识、报告内容、接收人 |
 
+## 空分区凭据与补算核对
+
+系统内置「当日成交量 / 地区」核对场景，初始事实为：华东 30、华南读取成功但确认 0 行、华北数据源超时。
+华南的 `TRUE_ZERO` 记录必须携带来源读取凭据；华北标记为 `SOURCE_UNAVAILABLE` 且指标值为 `null`，不能写成数值 0。
+
+常用接口：
+
+```bash
+# 准备/重置：华东30、华南确认空、华北超时
+curl -X POST http://127.0.0.1:8012/api/reconciliation/scenario/prepare
+
+# 预聚合分区、覆盖区间和凭据校验
+curl http://127.0.0.1:8012/api/domain/aggregate_job/1/validate-partitions
+
+# 指标查询生成第一份不可变报告（已确认总量 30，华北排除）
+curl http://127.0.0.1:8012/api/domain/dim_query/1/execute
+
+# 同一华北缺项重复提交：只返回同一个 backfill_id/claim_id
+curl -X POST http://127.0.0.1:8012/api/reconciliation/backfills \
+  -H 'Content-Type: application/json' -d '{"region":"华北"}'
+
+# 值班员回传华北 15
+curl -X POST http://127.0.0.1:8012/api/reconciliation/backfills/BF-0001/complete \
+  -H 'Content-Type: application/json' -d '{"value":15}'
+
+# 再次查询得到总量 45、实际范围为华东/华南/华北，并对照两份报告
+curl http://127.0.0.1:8012/api/domain/dim_query/1/execute
+curl http://127.0.0.1:8012/api/reconciliation/reports/RPT-0001/compare/RPT-0002
+
+# 第一份报告不能作为全国总量发布；只能发布已确认范围（30，排除华北）
+curl -X POST http://127.0.0.1:8012/api/reconciliation/reports/RPT-0001/publish \
+  -H 'Content-Type: application/json' -d '{"as_national":true}'
+```
+
+也可以直接调用 `POST /api/reconciliation/scenario/run` 运行完整脚本；前端「多维查询」「预聚合任务」
+页面顶部提供对应操作面板，可核对地区范围、来源、凭据、同一次领取和两份报告差异。
+
 ## 约定
 
 - 全部模块共享`frontend/src/views/WorkbenchView.vue|tsx`和一套资源路由。

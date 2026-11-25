@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.services import SERVICES
 
@@ -20,14 +20,41 @@ def metric_compute(metric_id: int) -> dict[str, Any]:
     return svc.domain_compute(metric_id)
 
 
-@router.get("/dim_query/{query_id}/execute")
-def dim_query_execute(query_id: int) -> dict[str, Any]:
-    """多维交叉查询执行。"""
+@router.api_route("/dim_query/{query_id}/execute", methods=["GET", "POST"])
+async def dim_query_execute(
+    query_id: int,
+    request: Request,
+    date: str | None = Query(default=None),
+    period: str | None = Query(default=None),
+    regions: list[str] | None = Query(default=None),
+    create_snapshot: bool = Query(default=True),
+):
+    """多维交叉查询执行，并生成/关联当期分区报告。"""
     from app.services.dim_query import DimQueryService
     svc = SERVICES.get("dim_query")
     if not svc or not isinstance(svc, DimQueryService):
         raise HTTPException(404, "多维查询服务不可用")
-    return svc.execute_query(query_id)
+
+    body: dict[str, Any] = {}
+    if request.method == "POST":
+        try:
+            parsed = await request.json()
+            if isinstance(parsed, dict):
+                body = parsed
+        except Exception:
+            body = {}
+
+    selected_date = body.get("date") or body.get("period") or date or period
+    selected_regions = body.get("regions") or regions
+    if isinstance(selected_regions, str):
+        selected_regions = [x.strip() for x in selected_regions.replace("，", ",").split(",") if x.strip()]
+    snapshot = body.get("create_snapshot", create_snapshot)
+    return svc.execute_query(
+        query_id,
+        date=str(selected_date) if selected_date else None,
+        regions=selected_regions,
+        create_snapshot=bool(snapshot),
+    )
 
 
 @router.get("/experiment/{experiment_id}/compute-effect")
@@ -90,14 +117,22 @@ def chart_render(chart_id: int) -> dict[str, Any]:
     return svc.render_chart_data(chart_id)
 
 
-@router.get("/aggregate_job/{job_id}/execute")
-def aggregate_job_execute(job_id: int) -> dict[str, Any]:
-    """预聚合任务执行。"""
+@router.api_route("/aggregate_job/{job_id}/execute", methods=["GET", "POST"])
+async def aggregate_job_execute(job_id: int, request: Request):
+    """预聚合任务执行，并核对分区凭据/空分区状态。"""
     from app.services.aggregate_job import AggregateJobService
     svc = SERVICES.get("aggregate_job")
     if not svc or not isinstance(svc, AggregateJobService):
         raise HTTPException(404, "预聚合任务服务不可用")
-    return svc.execute_aggregate(job_id)
+    payload: dict[str, Any] = dict(request.query_params)
+    if request.method == "POST":
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                payload.update(body)
+        except Exception:
+            pass
+    return svc.execute_aggregate(job_id, payload)
 
 
 @router.get("/drill_down/{path_id}/execute")

@@ -15,6 +15,11 @@
       </div>
     </header>
 
+    <ReconciliationPanel
+      v-if="['dim_query', 'aggregate_job', 'report_schedule'].includes(meta.key)"
+      :module-key="meta.key"
+    />
+
     <div class="stat-row">
       <article v-for="item in stats" :key="item.label" class="stat-card">
         <span class="stat-label">{{ item.label }}</span>
@@ -104,6 +109,7 @@ import {
   runAction as applyAction,
 } from '@/api/backend-service'
 import type { EntryRow } from '@/data/types'
+import ReconciliationPanel from '@/components/ReconciliationPanel.vue'
 
 const props = defineProps<{ moduleKey: string }>()
 const meta = moduleMeta(props.moduleKey)
